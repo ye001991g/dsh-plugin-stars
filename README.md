@@ -43,6 +43,8 @@ node scripts/build.mjs --source-dir <含 index.json 与 plugins.json 的目录>
 
 - 只包含**发布到 npm** 的插件（上游 `index.json` 的范围）；仅 GitHub 发版的条目不在其中。
 - 星数与下载量是生成时刻的快照；星数为 0 也照实显示。
+- 星数是**仓库级**的：同一 monorepo 里的多个包会显示同一个星数（例如 dsh-web 系列的多个包共享一个仓库）。
+- 星数来自上游 `plugins.json`（由 awesome-dsh-plugin 采集），不是本站实时抓 GitHub；上游每天更新一次。
 - 本仓库只是市场**元数据**。安装仍由 DSH 从 npm 拉取，并会在你的权限下运行第三方代码——装之前先核对来源（DSH 安装确认框会给出 npm 包名与版本）。
 - 数据版权归上游 awesome-dsh-plugin 项目及其列出的插件作者；本仓库只做聚合与展示。
 
