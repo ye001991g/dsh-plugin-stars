@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - run: npm ci
@@ -44,7 +44,21 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Purge the jsDelivr cache
+      - name: Purge and verify the jsDelivr copy
         if: steps.commit.outputs.changed == 'true'
         run: |
-          curl -fsS "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/index.json" || true
+          # The market reads this file from jsDelivr; a stale edge cache is the failure
+          # mode users would actually see, so fail the run when the CDN keeps serving
+          # the previous bytes after a purge.
+          curl -fsS "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/index.json" > purge.json || true
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS "https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/index.json" -o cdn.json \
+              && cmp -s cdn.json index.json; then
+              echo "CDN serves the freshly committed index"
+              exit 0
+            fi
+            echo "attempt ${attempt}: CDN still stale, retrying in 15s"
+            sleep 15
+          done
+          echo "CDN still serves stale bytes after purge" >&2
+          exit 1
