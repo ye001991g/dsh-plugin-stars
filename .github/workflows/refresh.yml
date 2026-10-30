@@ -2,8 +2,9 @@ name: refresh index
 
 on:
   schedule:
-    # Upstream publishes around 04:30 UTC; rebuild shortly after.
+    # Upstream publishes around 04:30 UTC; the second run retries a late upstream release.
     - cron: '10 5 * * *'
+    - cron: '10 8 * * *'
   workflow_dispatch:
 
 permissions:
@@ -16,6 +17,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +30,9 @@ jobs:
 
       - name: Build index.json
         run: npm run build
+
+      - name: Verify the built index
+        run: npm run verify -- index.json
 
       - name: Commit when it changed
         id: commit
@@ -50,7 +55,8 @@ jobs:
           # The market reads this file from jsDelivr; a stale edge cache is the failure
           # mode users would actually see, so fail the run when the CDN keeps serving
           # the previous bytes after a purge.
-          curl -fsS "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/index.json" > purge.json || true
+          purge=$(curl -fsS "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/index.json") || purge="purge request failed"
+          echo "$purge"
           for attempt in 1 2 3 4 5 6; do
             if curl -fsS "https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/index.json" -o cdn.json \
               && cmp -s cdn.json index.json; then

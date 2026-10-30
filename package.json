@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-plugin-market-index": "0.2.1-rc.3"
+  },
+  "engines": {
+    "node": ">=22.21.0"
   }
 }

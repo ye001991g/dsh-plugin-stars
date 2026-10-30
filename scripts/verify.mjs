@@ -3,6 +3,10 @@
  * Smoke-test a published index: fetch it and run DSH's own format-1 validator,
  * then assert the presentation invariants this index promises.
  *
+ * Node's fetch only reads HTTPS_PROXY when NODE_USE_ENV_PROXY was set before the
+ * process started (or `--use-env-proxy` was passed), so the caller must set it:
+ *   NODE_USE_ENV_PROXY=1 npm run verify
+ *
  * Usage:
  *   node scripts/verify.mjs                      # the published jsDelivr URL
  *   node scripts/verify.mjs index.json           # a local file
@@ -13,13 +17,21 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseMarketIndex } from '@deepseek-ai/dsh-plugin-market-index';
 
-if (!process.env.NODE_USE_ENV_PROXY && (process.env.HTTPS_PROXY || process.env.https_proxy)) {
-  process.env.NODE_USE_ENV_PROXY = '1';
-}
-
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLISHED_INDEX_URL = 'https://cdn.jsdelivr.net/gh/ye001991g/dsh-plugin-stars@main/index.json';
 const FETCH_TIMEOUT_MS = 120_000;
+
+function assertProxyWiring(target) {
+  if (!/^https?:\/\//u.test(target)) return;
+  const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.ALL_PROXY ?? process.env.all_proxy;
+  const enabled = /^(?:1|true)$/iu.test(process.env.NODE_USE_ENV_PROXY ?? '');
+  if (proxy !== undefined && !enabled) {
+    throw new Error(
+      'HTTPS_PROXY is set but Node fetch will ignore it: re-run with NODE_USE_ENV_PROXY=1 ' +
+        '(PowerShell: $env:NODE_USE_ENV_PROXY="1"; npm run verify) or `node --use-env-proxy scripts/verify.mjs`.',
+    );
+  }
+}
 
 /** Mirrors `formatCount` in build.mjs so the ★ text can be re-derived from the value. */
 function formatCount(value) {
@@ -54,25 +66,34 @@ function check(condition, message) {
 
 async function main() {
   const target = process.argv[2] ?? PUBLISHED_INDEX_URL;
+  assertProxyWiring(target);
+
   const { index, indexUrl } = await load(target);
   const parsed = parseMarketIndex(index, indexUrl);
 
-  const unstarred = { zero: 0, positive: 0, missing: 0 };
+  const counts = { positive: 0, zero: 0, missing: 0 };
   let starAuthors = 0;
-  let consistent = 0;
+  let expectedStarAuthors = 0;
   for (const plugin of parsed.plugins) {
     const stars = plugin.metadata.sortKeys.stars;
+    if (!Number.isFinite(stars)) counts.missing += 1;
+    else if (stars > 0) counts.positive += 1;
+    else counts.zero += 1;
+
     const expected = Number.isFinite(stars) && stars > 0 ? `★${formatCount(stars)}` : undefined;
-    if (!Number.isFinite(stars)) unstarred.missing += 1;
-    else if (stars > 0) unstarred.positive += 1;
-    else unstarred.zero += 1;
     if (typeof plugin.author === 'string' && plugin.author.includes('★')) starAuthors += 1;
     if (expected === undefined) {
       // 0/unknown stars must not carry a fake ★ marker.
-      check(!(typeof plugin.author === 'string' && plugin.author.includes('★')), `${plugin.name}: unexpected ★ in author`);
+      check(
+        !(typeof plugin.author === 'string' && plugin.author.includes('★')),
+        `${plugin.name}: unexpected ★ in author`,
+      );
     } else {
-      check(typeof plugin.author === 'string' && plugin.author.endsWith(expected), `${plugin.name}: author ${JSON.stringify(plugin.author)} != ${expected}`);
-      consistent += 1;
+      expectedStarAuthors += 1;
+      check(
+        typeof plugin.author === 'string' && plugin.author.endsWith(expected),
+        `${plugin.name}: author ${JSON.stringify(plugin.author)} does not end with ${expected}`,
+      );
     }
   }
 
@@ -80,14 +101,15 @@ async function main() {
   check(parsed.plugins.length > 0, 'index has no plugins');
   check(Object.hasOwn(parsed.metadata.sortKeys, 'stars'), 'stars sort key is missing');
   check(Object.hasOwn(parsed.metadata.sortKeys, 'downloads'), 'downloads sort key is missing');
-  check(unstarred.positive > 0, 'no plugin carries a positive stars value');
+  check(counts.positive > 0, 'no plugin carries a positive stars value');
   check(
     parsed.plugins.every(
-      (plugin, i) => i === 0 || (parsed.plugins[i - 1].metadata.sortKeys.stars ?? -1) >= (plugin.metadata.sortKeys.stars ?? -1),
+      (plugin, i) =>
+        i === 0 || (parsed.plugins[i - 1].metadata.sortKeys.stars ?? -1) >= (plugin.metadata.sortKeys.stars ?? -1),
     ),
     'plugins are not sorted by stars (descending)',
   );
-  check(starAuthors === consistent, `★ author count ${starAuthors} != plugins with positive stars ${consistent}`);
+  check(starAuthors === expectedStarAuthors, `★ author count ${starAuthors} != plugins with positive stars ${expectedStarAuthors}`);
 
   const top = parsed.plugins
     .filter((plugin) => Number.isFinite(plugin.metadata.sortKeys.stars) && plugin.metadata.sortKeys.stars > 0)
@@ -97,7 +119,7 @@ async function main() {
     [
       `VALID ${indexUrl}`,
       `plugins:   ${parsed.plugins.length}`,
-      `stars:     ${unstarred.positive} positive, ${unstarred.zero} zero, ${unstarred.missing} missing`,
+      `stars:     ${counts.positive} positive, ${counts.zero} zero, ${counts.missing} missing`,
       `authors:   ${starAuthors} carry ★ (all consistent with sortKeys.stars)`,
       `top 5:     ${top.join(', ')}`,
     ].join('\n') + '\n',

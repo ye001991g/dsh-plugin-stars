@@ -18,26 +18,23 @@
  *   - plugins sorted by stars desc (then downloads desc, then name), so the
  *     market's default order is popularity order.
  *
- * The output is validated with the same validator DSH uses
- * (@deepseek-ai/dsh-plugin-market-index); an invalid index is never written.
- * A >5% day-over-day drop in plugin count aborts the build, so a broken upstream
- * release cannot silently replace the published index.
+ * Guards (fail instead of publishing a bad index):
+ *   - DSH's own validator (@deepseek-ai/dsh-plugin-market-index) rejects a
+ *     malformed index, and nothing is written unless it passes.
+ *   - >5% day-over-day shrink of the plugin count aborts.
+ *   - <90% join rate against the curated list, or <90% of joined plugins without
+ *     a numeric star value, aborts: a silent "no stars anywhere" index is a
+ *     feature break, not a valid build.
  *
- * Usage:
- *   node scripts/build.mjs                      # latest upstream version
- *   node scripts/build.mjs --version 2026.1030.12510   # pin an upstream version
- *   node scripts/build.mjs --source-dir <dir>   # offline: expects index.json + plugins.json
+ * Usage (Node >= 22.21; set NODE_USE_ENV_PROXY=1 when you need HTTPS_PROXY):
+ *   NODE_USE_ENV_PROXY=1 npm run build
+ *   node --use-env-proxy scripts/build.mjs --version 2026.1030.12510
+ *   node scripts/build.mjs --source-dir <dir>   # offline: index.json + plugins.json
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseMarketIndex } from '@deepseek-ai/dsh-plugin-market-index';
-
-// Node's built-in fetch ignores proxy environment variables unless this is enabled
-// (Node >= 24). Harmless on an older Node when no proxy is configured.
-if (!process.env.NODE_USE_ENV_PROXY && (process.env.HTTPS_PROXY || process.env.https_proxy)) {
-  process.env.NODE_USE_ENV_PROXY = '1';
-}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE_PACKAGE = 'dsh-plugin-catalog';
@@ -45,7 +42,25 @@ const SOURCE_SITE = 'https://awesome-dsh-plugin.com';
 const PUBLISHED_INDEX_URL = 'https://cdn.jsdelivr.net/gh/ye001991g/dsh-plugin-stars@main/index.json';
 const USER_AGENT = 'dsh-plugin-stars-build/1.0 (+https://github.com/ye001991g/dsh-plugin-stars)';
 const MAX_SHRINK_RATIO = 0.95;
+const MIN_JOINED_RATIO = 0.9;
+const MIN_STARRED_RATIO = 0.9;
 const FETCH_TIMEOUT_MS = 120_000;
+
+/**
+ * Node's fetch only reads HTTPS_PROXY when NODE_USE_ENV_PROXY was set before the
+ * process started (or `--use-env-proxy` was passed); setting it here is too late.
+ * Fail early with the fix instead of silently fetching direct.
+ */
+function assertProxyWiring() {
+  const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.ALL_PROXY ?? process.env.all_proxy;
+  const enabled = /^(?:1|true)$/iu.test(process.env.NODE_USE_ENV_PROXY ?? '');
+  if (proxy !== undefined && !enabled) {
+    throw new Error(
+      'HTTPS_PROXY is set but Node fetch will ignore it: re-run with NODE_USE_ENV_PROXY=1 ' +
+        '(PowerShell: $env:NODE_USE_ENV_PROXY="1"; npm run build) or `node --use-env-proxy scripts/build.mjs`.',
+    );
+  }
+}
 
 function arg(name) {
   const index = process.argv.indexOf(`--${name}`);
@@ -143,9 +158,14 @@ function compareName(left, right) {
 function enrich(index, full) {
   const byPage = new Map(full.plugins.map((plugin) => [plugin.page, plugin]));
   const byRepo = new Map();
+  // Upstream snapshots per plugin entry can disagree for the same repository; use the
+  // highest value seen for that repository so one repo always shows one star count.
+  const repoMaxStars = new Map();
   for (const plugin of full.plugins) {
     const key = repoKey(plugin.url);
-    if (key !== undefined && !byRepo.has(key)) byRepo.set(key, plugin);
+    if (key === undefined || typeof plugin.stars !== 'number' || !Number.isFinite(plugin.stars)) continue;
+    repoMaxStars.set(key, Math.max(repoMaxStars.get(key) ?? 0, plugin.stars));
+    if (!byRepo.has(key)) byRepo.set(key, plugin);
   }
 
   let joined = 0;
@@ -154,7 +174,11 @@ function enrich(index, full) {
     const match =
       (entry.homepage === undefined ? undefined : byPage.get(entry.homepage)) ??
       byRepo.get(repoKey(entry.repository?.url));
-    const stars = typeof match?.stars === 'number' && Number.isFinite(match.stars) ? match.stars : undefined;
+    const key = match === undefined ? repoKey(entry.repository?.url) : repoKey(match.url);
+    const stars =
+      key === undefined || !repoMaxStars.has(key)
+        ? undefined
+        : repoMaxStars.get(key);
     const downloads =
       typeof match?.downloads === 'number' && Number.isFinite(match.downloads) ? match.downloads : undefined;
     if (match !== undefined) joined += 1;
@@ -248,6 +272,27 @@ async function assertNoShrink(nextCount) {
   }
 }
 
+/** A "valid but starless" index means the upstream join broke; fail loudly. */
+function assertCoverage(composed) {
+  const total = composed.index.plugins.length;
+  // Numeric stars include 0: a fifth of the curated list legitimately has no stars yet.
+  const numeric = composed.index.plugins.filter((plugin) =>
+    Number.isFinite(plugin.metadata.sortKeys.stars),
+  ).length;
+  if (total > 0 && composed.joined < total * MIN_JOINED_RATIO) {
+    throw new Error(
+      `refusing to publish: only ${composed.joined}/${total} plugins joined the curated list ` +
+        `(minimum ${(MIN_JOINED_RATIO * 100).toFixed(0)}%); upstream page/homepage keys probably changed`,
+    );
+  }
+  if (composed.joined > 0 && numeric < composed.joined * MIN_STARRED_RATIO) {
+    throw new Error(
+      `refusing to publish: only ${numeric}/${composed.joined} joined plugins carry a numeric star count ` +
+        `(minimum ${(MIN_STARRED_RATIO * 100).toFixed(0)}%); upstream stars field probably changed`,
+    );
+  }
+}
+
 function summarize(parsed, extra) {
   const stars = parsed.plugins.map((plugin) => plugin.metadata.sortKeys.stars).filter(Number.isFinite);
   const range = stars.length === 0 ? 'n/a' : `${Math.min(...stars)}..${Math.max(...stars)}`;
@@ -255,16 +300,23 @@ function summarize(parsed, extra) {
     .filter((plugin) => Number.isFinite(plugin.metadata.sortKeys.stars) && plugin.metadata.sortKeys.stars > 0)
     .slice(0, 8)
     .map((plugin) => `${plugin.name} (${plugin.metadata.sortKeys.stars}★)`);
+  const starred = parsed.plugins.filter(
+    (plugin) => Number.isFinite(plugin.metadata.sortKeys.stars) && plugin.metadata.sortKeys.stars > 0,
+  ).length;
+  const numeric = parsed.plugins.filter((plugin) => Number.isFinite(plugin.metadata.sortKeys.stars)).length;
   return [
     `upstream:       ${extra.upstream}`,
     `plugins:        ${parsed.plugins.length}`,
-    `joined to full: ${extra.joined} (stars), ${extra.withDownloads} (downloads)`,
-    `stars range:    ${range}`,
+    `joined to full: ${extra.joined} (${extra.joined > 0 ? ((extra.joined / parsed.plugins.length) * 100).toFixed(1) : '0'}%), ` +
+      `${extra.withDownloads} with downloads`,
+    `stars:          ${numeric} numeric (${starred} positive), range ${range}`,
     `top 8:          ${top.join(', ')}`,
   ].join('\n');
 }
 
 async function main() {
+  assertProxyWiring();
+
   const sourceDir = arg('source-dir');
   const source =
     sourceDir === undefined
@@ -272,6 +324,7 @@ async function main() {
       : await loadLocal(path.resolve(sourceDir));
 
   const composed = compose(source);
+  assertCoverage(composed);
   // Validate with DSH's own validator; also normalizes (drops unknown members, sorts versions).
   const parsed = parseMarketIndex(composed.index, PUBLISHED_INDEX_URL);
   await assertNoShrink(parsed.plugins.length);
