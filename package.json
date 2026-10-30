@@ -1,0 +1,13 @@
+{
+  "name": "dsh-plugin-stars",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A DSH format-1 plugin market index enriched with GitHub stars and npm downloads",
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-plugin-market-index": "0.2.1-rc.3"
+  }
+}
