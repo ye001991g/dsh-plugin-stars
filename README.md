@@ -30,14 +30,19 @@ format 1 没有数值展示字段：卡片只渲染 标题 / 标签 / 描述 / `
 - 只读上游数据，不调 GitHub API、不需要 token：`scripts/build.mjs` 取两个文件、按 `homepage`（缺失时按仓库 URL）关联，写入作者行与排序键后按星数降序排列。
 - 生成结果用 DSH 同款校验器 `@deepseek-ai/dsh-plugin-market-index` 校验（与运行的 DSH 版本一致 `0.2.1-rc.3`），不合法不会写盘。
 
-## 本地重新生成
+## 本地重新生成与自检
 
 ```sh
 npm install
 npm run build                                  # 上游最新版本
 node scripts/build.mjs --version 2026.1030.12510
 node scripts/build.mjs --source-dir <含 index.json 与 plugins.json 的目录>
+
+npm run verify                                 # 拉取线上 index.json 并用官方校验器自检
+node scripts/verify.mjs index.json             # 或校验本地文件
 ```
+
+`verify` 会检查：format=1、插件非空、`stars`/`downloads` 两个排序键已声明、星数降序、作者行带 ★。
 
 ## 边界
 

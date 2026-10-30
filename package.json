@@ -5,7 +5,8 @@
   "type": "module",
   "description": "A DSH format-1 plugin market index enriched with GitHub stars and npm downloads",
   "scripts": {
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-plugin-market-index": "0.2.1-rc.3"
